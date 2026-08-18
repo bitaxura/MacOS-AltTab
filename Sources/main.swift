@@ -8,17 +8,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard checkAccessibilityPermission() else { return }
 
         GestureEngine.shared.start()
-        ScrollRemapper.shared.start()
         KeyInterceptor.shared.start()
         SwitcherController.shared.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem?.button?.image = NSImage(systemSymbolName: "hand.point.up.left.fill", accessibilityDescription: "Trackpad Gestures")
 
+        buildMenu()
+    }
+
+    private func buildMenu() {
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Trackpad Gestures — running", action: nil, keyEquivalent: ""))
+
+        let titleItem = NSMenuItem(title: "Trackpad Gestures — Running", action: nil, keyEquivalent: "")
+        titleItem.isEnabled = false
+        menu.addItem(titleItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
         statusItem?.menu = menu
     }
 

@@ -16,6 +16,18 @@ final class SwitcherController {
         }
     }
 
+    var totalWindowsCount: Int {
+        panel.totalWindowsCount
+    }
+
+    var gridColumns: Int {
+        panel.currentGridColumns
+    }
+
+    var gridRows: Int {
+        panel.currentGridRows
+    }
+
     func showWindowSwitcher(initialIndex: Int = 0) {
         if !Thread.isMainThread {
             DispatchQueue.main.async { [weak self] in
@@ -31,6 +43,50 @@ final class SwitcherController {
             self?.activateWindow(item)
         }
         panel.show(windows: windows, initialIndex: initialIndex)
+    }
+
+    func showWindowSwitcher(initialDirection: Int) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.showWindowSwitcher(initialDirection: initialDirection)
+            }
+            return
+        }
+
+        let windows = WindowEngine.shared.windows()
+        guard !windows.isEmpty else { return }
+
+        let initialIndex: Int
+        if initialDirection > 0 {
+            initialIndex = windows.count > 1 ? 1 : 0
+        } else {
+            initialIndex = windows.count > 1 ? windows.count - 1 : 0
+        }
+
+        panel.onCommit = { [weak self] item in
+            self?.activateWindow(item)
+        }
+        panel.show(windows: windows, initialIndex: initialIndex)
+    }
+
+    func select(index: Int) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.select(index: index)
+            }
+            return
+        }
+        panel.select(index: index)
+    }
+
+    func selectGrid(row: Int, col: Int) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.selectGrid(row: row, col: col)
+            }
+            return
+        }
+        panel.selectGrid(row: row, col: col)
     }
 
     func step(direction: Int) {
@@ -64,10 +120,10 @@ final class SwitcherController {
         }
     }
 
-    func stepGrid(rowDelta: Int, colDelta: Int) {
+    func stepGrid(rowDelta: Int, colDelta: Int, allowWrap: Bool = false) {
         if !Thread.isMainThread {
             DispatchQueue.main.async { [weak self] in
-                self?.stepGrid(rowDelta: rowDelta, colDelta: colDelta)
+                self?.stepGrid(rowDelta: rowDelta, colDelta: colDelta, allowWrap: allowWrap)
             }
             return
         }
@@ -77,7 +133,7 @@ final class SwitcherController {
             return
         }
 
-        panel.stepGrid(rowDelta: rowDelta, colDelta: colDelta)
+        panel.stepGrid(rowDelta: rowDelta, colDelta: colDelta, allowWrap: allowWrap)
     }
 
     func closeSelectedWindow() {
@@ -89,6 +145,7 @@ final class SwitcherController {
         }
 
         guard let item = panel.selectedItem else { return }
+        WindowEngine.shared.removeWindow(item)
         closeWindow(item)
         panel.removeSelectedWindow()
     }
@@ -146,6 +203,8 @@ final class SwitcherController {
     }
 
     private func activateWindow(_ item: WindowItem) {
+        WindowEngine.shared.promoteToMRUFront(item)
+
         let targetApp = item.app
         let targetWindow = item.axWindow
 

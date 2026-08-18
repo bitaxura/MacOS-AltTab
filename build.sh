@@ -17,7 +17,6 @@ swiftc \
     Sources/main.swift \
     Sources/GestureEngine.swift \
     Sources/ActionPoster.swift \
-    Sources/ScrollRemapper.swift \
     Sources/WindowEngine.swift \
     Sources/WindowPreview.swift \
     Sources/SwitcherPanel.swift \

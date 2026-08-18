@@ -25,6 +25,61 @@ struct WindowItem: Equatable {
 final class WindowEngine {
     static let shared = WindowEngine()
 
+    private var mruHistory: [WindowItem] = []
+
+    init() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(appDidActivate(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
+    }
+
+    @objc private func appDidActivate(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            self?.recordActiveWindow()
+        }
+    }
+
+    func recordActiveWindow() {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication,
+              frontApp.activationPolicy == .regular,
+              frontApp.bundleIdentifier != Bundle.main.bundleIdentifier
+        else { return }
+
+        let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+        var rawFocusedWindow: AnyObject?
+        var axWindow: AXUIElement? = nil
+
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &rawFocusedWindow) == .success,
+           let win = rawFocusedWindow {
+            axWindow = (win as! AXUIElement)
+        } else if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &rawFocusedWindow) == .success,
+                  let win = rawFocusedWindow {
+            axWindow = (win as! AXUIElement)
+        }
+
+        if let targetAX = axWindow {
+            if let index = mruHistory.firstIndex(where: { CFEqual($0.axWindow, targetAX) }) {
+                let item = mruHistory.remove(at: index)
+                mruHistory.insert(item, at: 0)
+            }
+        } else if let index = mruHistory.firstIndex(where: { $0.app.processIdentifier == frontApp.processIdentifier }) {
+            let item = mruHistory.remove(at: index)
+            mruHistory.insert(item, at: 0)
+        }
+    }
+
+    func promoteToMRUFront(_ item: WindowItem) {
+        mruHistory.removeAll { $0 == item }
+        mruHistory.insert(item, at: 0)
+    }
+
+    func removeWindow(_ item: WindowItem) {
+        mruHistory.removeAll { $0 == item }
+    }
+
     func windows() -> [WindowItem] {
         let runningApps = NSWorkspace.shared.runningApplications.filter {
             $0.activationPolicy == .regular && $0.processIdentifier > 0
@@ -51,45 +106,63 @@ final class WindowEngine {
             }
         }
 
-        guard !discoveredItems.isEmpty else { return [] }
-
-        // Order windows according to true on-screen front-to-back z-order (MRU order)
-        var orderedResult: [WindowItem] = []
-        var addedWindowIDs = Set<CGWindowID>()
-        var addedAXWindows: [AXUIElement] = []
-
-        func isAlreadyAdded(_ item: WindowItem) -> Bool {
-            if item.cgWindowID != kCGNullWindowID && addedWindowIDs.contains(item.cgWindowID) {
-                return true
-            }
-            return addedAXWindows.contains { CFEqual($0, item.axWindow) }
+        guard !discoveredItems.isEmpty else {
+            mruHistory.removeAll()
+            return []
         }
 
-        func recordAdded(_ item: WindowItem) {
-            if item.cgWindowID != kCGNullWindowID {
-                addedWindowIDs.insert(item.cgWindowID)
+        // Clean and update existing MRU history with fresh metadata
+        var updatedMRU: [WindowItem] = []
+        for mruItem in mruHistory {
+            if let freshItem = discoveredItems.first(where: { $0 == mruItem }) {
+                updatedMRU.append(freshItem)
             }
-            addedAXWindows.append(item.axWindow)
-            orderedResult.append(item)
         }
 
-        // 1. First append windows that appear in the active layer 0 z-order list
+        // Identify current frontmost window
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        var currentFrontItem: WindowItem? = nil
+        if let frontApp = frontApp, frontApp.bundleIdentifier != Bundle.main.bundleIdentifier {
+            let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+            var rawFocused: AnyObject?
+            if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &rawFocused) == .success,
+               let win = rawFocused {
+                let ax = win as! AXUIElement
+                currentFrontItem = discoveredItems.first(where: { CFEqual($0.axWindow, ax) })
+            } else if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &rawFocused) == .success,
+                      let win = rawFocused {
+                let ax = win as! AXUIElement
+                currentFrontItem = discoveredItems.first(where: { CFEqual($0.axWindow, ax) })
+            }
+            if currentFrontItem == nil {
+                currentFrontItem = discoveredItems.first(where: { $0.app.processIdentifier == frontApp.processIdentifier })
+            }
+        }
+
+        // Put the currently active window at position 0 in MRU list
+        if let front = currentFrontItem {
+            updatedMRU.removeAll { $0 == front }
+            updatedMRU.insert(front, at: 0)
+        }
+
+        // Append any windows in layer 0 z-order that aren't yet in MRU history
         for info in layer0CGWindows {
             guard let rawWid = info[kCGWindowNumber as String] as? Int else { continue }
             let wid = CGWindowID(rawWid)
-            if let item = itemByWindowID[wid], !isAlreadyAdded(item) {
-                recordAdded(item)
+            if let item = itemByWindowID[wid], !updatedMRU.contains(where: { $0 == item }) {
+                updatedMRU.append(item)
             }
         }
 
-        // 2. Append any remaining discovered windows (minimized or on other spaces)
+        // Append any remaining discovered windows (minimized or other spaces)
         for item in discoveredItems {
-            if !isAlreadyAdded(item) {
-                recordAdded(item)
+            if !updatedMRU.contains(where: { $0 == item }) {
+                updatedMRU.append(item)
             }
         }
 
-        return orderedResult
+        self.mruHistory = updatedMRU
+        return updatedMRU
     }
 
     private func axWindows(for appElement: AXUIElement) -> [AXUIElement] {
@@ -110,7 +183,7 @@ final class WindowEngine {
 
         // Verify subrole
         let subrole = value(for: axWindow, key: kAXSubroleAttribute as CFString) as? String ?? ""
-        if subrole == "AXDesktopWindow" || subrole == "AXUnknown" {
+        if subrole == "AXDesktopWindow" {
             return nil
         }
 
@@ -126,6 +199,9 @@ final class WindowEngine {
         // Window title resolution
         var rawTitle = (value(for: axWindow, key: kAXTitleAttribute as CFString) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if rawTitle.isEmpty {
+            if subrole == "AXUnknown" {
+                return nil
+            }
             if let doc = (value(for: axWindow, key: kAXDocumentAttribute as CFString) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !doc.isEmpty {
                 rawTitle = URL(fileURLWithPath: doc).lastPathComponent
             } else if let desc = (value(for: axWindow, key: kAXDescriptionAttribute as CFString) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !desc.isEmpty {
@@ -165,13 +241,17 @@ final class WindowEngine {
         )
     }
 
+    private static let profileRegex = try? NSRegularExpression(
+        pattern: #"^(Personal|Work|School|Default|Profile \d+|Guest)\s*[—–-]\s*"#,
+        options: .caseInsensitive
+    )
+
     private func parseTitleAndSubtitle(_ rawTitle: String, appName: String, app: NSRunningApplication) -> (title: String, subtitle: String?) {
         var title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         var subtitle: String? = nil
 
         // 1. Check for Safari / Browser Profile prefixes (e.g. "Personal — Page Title" or "Work — Page Title")
-        let profilePattern = #"^(Personal|Work|School|Default|Profile \d+|Guest)\s*[—–-]\s*"#
-        if let regex = try? NSRegularExpression(pattern: profilePattern, options: .caseInsensitive),
+        if let regex = WindowEngine.profileRegex,
            let match = regex.firstMatch(in: title, options: [], range: NSRange(location: 0, length: title.utf16.count)),
            let range = Range(match.range, in: title) {
             let matchedProfile = String(title[range]).trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: "—–-")))
@@ -199,7 +279,6 @@ final class WindowEngine {
             if parts.count == 2 {
                 let part0 = parts[0].trimmingCharacters(in: .whitespaces)
                 let part1 = parts[1].trimmingCharacters(in: .whitespaces)
-                // If part0 looks like a project/folder and part1 is a file, or vice-versa
                 if part0.contains(".") && !part1.contains(".") {
                     title = part0
                     subtitle = part1

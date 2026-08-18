@@ -185,29 +185,89 @@ final class SwitcherPanel: NSPanel {
         scrollToSelectedCard()
     }
 
-    func stepGrid(rowDelta: Int, colDelta: Int) {
+    func stepGrid(rowDelta: Int, colDelta: Int, allowWrap: Bool = false) {
         guard !windows.isEmpty else { return }
 
-        if colDelta != 0 {
-            if colDelta > 0 {
-                next()
+        if gridRows <= 1 {
+            if allowWrap {
+                let totalDelta = colDelta + rowDelta
+                if totalDelta > 0 {
+                    for _ in 0..<totalDelta { next() }
+                } else if totalDelta < 0 {
+                    for _ in 0..<abs(totalDelta) { previous() }
+                }
             } else {
-                previous()
+                let delta = colDelta + rowDelta
+                let newIndex = max(0, min(selectedIndex + delta, windows.count - 1))
+                selectedIndex = newIndex
+                updateCardHighlights()
+                scrollToSelectedCard()
             }
             return
         }
 
-        if rowDelta != 0 && gridRows > 1 {
-            let currentRow = selectedIndex / gridColumns
-            let currentCol = selectedIndex % gridColumns
-            let targetRow = (currentRow + rowDelta + gridRows) % gridRows
-            let countInTargetRow = min(gridColumns, windows.count - targetRow * gridColumns)
-            let targetCol = min(currentCol, countInTargetRow - 1)
-            let targetIndex = targetRow * gridColumns + targetCol
-            selectedIndex = targetIndex
-            updateCardHighlights()
-            scrollToSelectedCard()
+        var currentRow = selectedIndex / gridColumns
+        var currentCol = selectedIndex % gridColumns
+
+        // 1. Horizontal navigation
+        if colDelta != 0 {
+            let countInCurrentRow = min(gridColumns, windows.count - currentRow * gridColumns)
+            let newCol = currentCol + colDelta
+            if newCol >= 0 && newCol < countInCurrentRow {
+                currentCol = newCol
+            } else if newCol >= countInCurrentRow {
+                if currentRow + 1 < gridRows {
+                    currentRow += 1
+                    currentCol = 0
+                } else if allowWrap {
+                    currentRow = 0
+                    currentCol = 0
+                } else {
+                    currentCol = countInCurrentRow - 1
+                }
+            } else if newCol < 0 {
+                if currentRow - 1 >= 0 {
+                    currentRow -= 1
+                    let countInPrevRow = min(gridColumns, windows.count - currentRow * gridColumns)
+                    currentCol = countInPrevRow - 1
+                } else if allowWrap {
+                    currentRow = gridRows - 1
+                    let countInLastRow = min(gridColumns, windows.count - currentRow * gridColumns)
+                    currentCol = countInLastRow - 1
+                } else {
+                    currentCol = 0
+                }
+            }
         }
+
+        // 2. Vertical navigation
+        if rowDelta != 0 {
+            let newRow = currentRow + rowDelta
+            if newRow >= 0 && newRow < gridRows {
+                currentRow = newRow
+            } else if allowWrap {
+                currentRow = (newRow + gridRows) % gridRows
+            }
+            let countInTargetRow = min(gridColumns, windows.count - currentRow * gridColumns)
+            currentCol = min(currentCol, countInTargetRow - 1)
+        }
+
+        let targetIndex = currentRow * gridColumns + currentCol
+        selectedIndex = max(0, min(targetIndex, windows.count - 1))
+        updateCardHighlights()
+        scrollToSelectedCard()
+    }
+
+    var totalWindowsCount: Int {
+        windows.count
+    }
+
+    var currentGridColumns: Int {
+        gridColumns
+    }
+
+    var currentGridRows: Int {
+        gridRows
     }
 
     func select(index: Int) {
@@ -215,6 +275,15 @@ final class SwitcherPanel: NSPanel {
         selectedIndex = index
         updateCardHighlights()
         scrollToSelectedCard()
+    }
+
+    func selectGrid(row: Int, col: Int) {
+        guard !windows.isEmpty else { return }
+        let clampedRow = max(0, min(row, gridRows - 1))
+        let countInTargetRow = min(gridColumns, windows.count - clampedRow * gridColumns)
+        let clampedCol = max(0, min(col, max(0, countInTargetRow - 1)))
+        let targetIndex = min(clampedRow * gridColumns + clampedCol, windows.count - 1)
+        select(index: targetIndex)
     }
 
     func removeSelectedWindow() {
