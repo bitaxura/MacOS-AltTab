@@ -7,36 +7,22 @@
 // This shape has been stable across macOS releases for over a decade and is
 // the same one used by tools like BetterTouchTool, Mac Mouse Fix, and MiddleDrag.
 
-typedef struct {
-    float x;
-    float y;
-} MTPoint;
-
-typedef struct {
-    MTPoint position;
-    MTPoint velocity;
-} MTVector;
+typedef struct { float x, y; } MTPoint;
+typedef struct { MTPoint position, velocity; } MTVector;
 
 typedef struct {
     int32_t frame;
     double timestamp;
-    int32_t identifier;
-    int32_t state;
-    int32_t unused1;
-    int32_t unused2;
+    int32_t identifier, state, unused1, unused2;
     MTVector normalized;
     float size;
     int32_t unused3;
-    float angle;
-    float majorAxis;
-    float minorAxis;
+    float angle, majorAxis, minorAxis;
     MTVector unused4;
-    int32_t unused5;
-    int32_t unused6;
+    int32_t unused5, unused6;
 } MTTouch;
 
 typedef void *MTDeviceRef;
-
 typedef int (*MTContactCallbackFunction)(MTDeviceRef device, MTTouch *data, int32_t numFingers, double timestamp, int32_t frame);
 
 extern MTDeviceRef MTDeviceCreateDefault(void);

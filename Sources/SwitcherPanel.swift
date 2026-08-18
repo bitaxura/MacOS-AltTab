@@ -1,19 +1,30 @@
 import AppKit
+import ApplicationServices
+
+private func makeLabel(size: CGFloat, weight: NSFont.Weight, color: NSColor, lines: Int = 1) -> NSTextField {
+    let lbl = NSTextField(labelWithString: "")
+    lbl.font = .systemFont(ofSize: size, weight: weight)
+    lbl.textColor = color
+    lbl.alignment = .center
+    lbl.maximumNumberOfLines = lines
+    lbl.lineBreakMode = .byTruncatingTail
+    return lbl
+}
 
 private final class SwitcherCardView: NSView {
     let index: Int
     var isCardSelected: Bool = false {
         didSet {
+            guard oldValue != isCardSelected else { return }
             updateSelectionState()
         }
     }
-
     var onClick: ((Int) -> Void)?
     var onHover: ((Int) -> Void)?
 
     private let iconImageView = NSImageView()
-    private let appLabel = NSTextField(labelWithString: "")
-    private let titleLabel = NSTextField(labelWithString: "")
+    private let appLabel = makeLabel(size: 11, weight: .semibold, color: NSColor(white: 0.75, alpha: 1.0))
+    private let titleLabel = makeLabel(size: 12, weight: .bold, color: .white, lines: 3)
     private var trackingArea: NSTrackingArea?
 
     init(index: Int, window: WindowItem, frame: NSRect) {
@@ -32,89 +43,51 @@ private final class SwitcherCardView: NSView {
         addSubview(iconImageView)
 
         // App Name + Subtitle Badge (e.g. "Safari • Personal" or "Antigravity IDE • TrackpadGestures")
-        let appNameText: String
-        if let sub = window.subtitle, !sub.isEmpty {
-            appNameText = "\(window.appName) • \(sub)"
-        } else {
-            appNameText = window.appName
-        }
-        appLabel.stringValue = appNameText
+        appLabel.stringValue = window.subtitle.map { "\(window.appName) • \($0)" } ?? window.appName
         appLabel.frame = NSRect(x: 8, y: 44, width: frame.width - 16, height: 16)
-        appLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        appLabel.textColor = NSColor(white: 0.75, alpha: 1.0)
-        appLabel.alignment = .center
-        appLabel.lineBreakMode = .byTruncatingTail
         addSubview(appLabel)
 
         // Rich Window Title Label (Supports up to 3 lines of clear, full-length text)
         titleLabel.stringValue = window.title
         titleLabel.frame = NSRect(x: 8, y: 6, width: frame.width - 16, height: 36)
-        titleLabel.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-        titleLabel.textColor = .white
-        titleLabel.alignment = .center
-        titleLabel.maximumNumberOfLines = 3
-        titleLabel.lineBreakMode = .byTruncatingTail
         addSubview(titleLabel)
 
         updateSelectionState()
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let existing = trackingArea {
-            removeTrackingArea(existing)
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
+        if let existing = trackingArea { removeTrackingArea(existing) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(area)
         trackingArea = area
     }
 
-    override func mouseEntered(with event: NSEvent) {
-        onHover?(index)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        onClick?(index)
-    }
+    override func mouseEntered(with event: NSEvent) { onHover?(index) }
+    override func mouseDown(with event: NSEvent) { onClick?(index) }
 
     private func updateSelectionState() {
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.1)
-        if isCardSelected {
-            layer?.borderColor = NSColor.controlAccentColor.cgColor
-            layer?.borderWidth = 3.0
-            layer?.backgroundColor = NSColor(white: 0.35, alpha: 0.7).cgColor
-            titleLabel.textColor = .white
-            appLabel.textColor = NSColor(white: 0.95, alpha: 1.0)
-        } else {
-            layer?.borderColor = NSColor(white: 1.0, alpha: 0.12).cgColor
-            layer?.borderWidth = 1.0
-            layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.5).cgColor
-            titleLabel.textColor = NSColor(white: 0.88, alpha: 1.0)
-            appLabel.textColor = NSColor(white: 0.6, alpha: 1.0)
-        }
+        layer?.borderColor = isCardSelected ? NSColor.controlAccentColor.cgColor : NSColor(white: 1.0, alpha: 0.12).cgColor
+        layer?.borderWidth = isCardSelected ? 3.0 : 1.0
+        layer?.backgroundColor = isCardSelected ? NSColor(white: 0.35, alpha: 0.7).cgColor : NSColor(white: 0.12, alpha: 0.5).cgColor
+        titleLabel.textColor = isCardSelected ? .white : NSColor(white: 0.88, alpha: 1.0)
+        appLabel.textColor = isCardSelected ? NSColor(white: 0.95, alpha: 1.0) : NSColor(white: 0.6, alpha: 1.0)
         CATransaction.commit()
     }
 }
 
 final class SwitcherPanel: NSPanel {
-    var onCommit: ((WindowItem) -> Void)?
-    var onCancel: (() -> Void)?
+    static let shared = SwitcherPanel()
 
-    private var windows: [WindowItem] = []
-    private var selectedIndex = 0
+    private(set) var windows: [WindowItem] = []
+    private(set) var selectedIndex = 0
+    private(set) var gridColumns = 1
+    private(set) var gridRows = 1
     private var cardViews: [SwitcherCardView] = []
-    private var gridColumns = 1
-    private var gridRows = 1
 
     private let visualEffectView = NSVisualEffectView()
     private let scrollView = NSScrollView()
@@ -149,168 +122,98 @@ final class SwitcherPanel: NSPanel {
         contentView = visualEffectView
     }
 
-    var isActive: Bool {
-        isVisible
-    }
-
     var selectedItem: WindowItem? {
-        guard !windows.isEmpty, selectedIndex >= 0, selectedIndex < windows.count else { return nil }
-        return windows[selectedIndex]
+        windows.indices.contains(selectedIndex) ? windows[selectedIndex] : nil
     }
 
-    func show(windows: [WindowItem], initialIndex: Int) {
-        guard !windows.isEmpty else { return }
-
-        self.windows = windows
-        selectedIndex = min(max(initialIndex, 0), windows.count - 1)
-
-        buildCards()
-        updateLayoutAndPosition()
-        updateCardHighlights()
-
+    func show(initialDirection: Int = 1) {
+        let wins = WindowEngine.shared.windows()
+        guard !wins.isEmpty else { return }
+        windows = wins
+        selectedIndex = initialDirection > 0 ? (wins.count > 1 ? 1 : 0) : max(0, wins.count - 1)
+        render()
         orderFrontRegardless()
     }
 
-    func next() {
+    func step(direction: Int) {
+        if !isVisible {
+            show(initialDirection: direction)
+            return
+        }
         guard !windows.isEmpty else { return }
-        selectedIndex = (selectedIndex + 1) % windows.count
-        updateCardHighlights()
-        scrollToSelectedCard()
-    }
-
-    func previous() {
-        guard !windows.isEmpty else { return }
-        selectedIndex = (selectedIndex - 1 + windows.count) % windows.count
-        updateCardHighlights()
-        scrollToSelectedCard()
+        selectedIndex = (selectedIndex + (direction > 0 ? 1 : windows.count - 1)) % windows.count
+        updateHighlightsAndScroll()
     }
 
     func stepGrid(rowDelta: Int, colDelta: Int, allowWrap: Bool = false) {
-        guard !windows.isEmpty else { return }
-
-        if gridRows <= 1 {
-            if allowWrap {
-                let totalDelta = colDelta + rowDelta
-                if totalDelta > 0 {
-                    for _ in 0..<totalDelta { next() }
-                } else if totalDelta < 0 {
-                    for _ in 0..<abs(totalDelta) { previous() }
-                }
-            } else {
-                let delta = colDelta + rowDelta
-                let newIndex = max(0, min(selectedIndex + delta, windows.count - 1))
-                selectedIndex = newIndex
-                updateCardHighlights()
-                scrollToSelectedCard()
-            }
+        if !isVisible {
+            step(direction: colDelta >= 0 ? 1 : -1)
             return
         }
-
-        var currentRow = selectedIndex / gridColumns
-        var currentCol = selectedIndex % gridColumns
-
-        // 1. Horizontal navigation
-        if colDelta != 0 {
-            let countInCurrentRow = min(gridColumns, windows.count - currentRow * gridColumns)
-            let newCol = currentCol + colDelta
-            if newCol >= 0 && newCol < countInCurrentRow {
-                currentCol = newCol
-            } else if newCol >= countInCurrentRow {
-                if currentRow + 1 < gridRows {
-                    currentRow += 1
-                    currentCol = 0
-                } else if allowWrap {
-                    currentRow = 0
-                    currentCol = 0
-                } else {
-                    currentCol = countInCurrentRow - 1
-                }
-            } else if newCol < 0 {
-                if currentRow - 1 >= 0 {
-                    currentRow -= 1
-                    let countInPrevRow = min(gridColumns, windows.count - currentRow * gridColumns)
-                    currentCol = countInPrevRow - 1
-                } else if allowWrap {
-                    currentRow = gridRows - 1
-                    let countInLastRow = min(gridColumns, windows.count - currentRow * gridColumns)
-                    currentCol = countInLastRow - 1
-                } else {
-                    currentCol = 0
-                }
+        guard !windows.isEmpty else { return }
+        if gridRows <= 1 {
+            let delta = colDelta + rowDelta
+            selectedIndex = allowWrap ? (selectedIndex + delta % windows.count + windows.count) % windows.count : max(0, min(windows.count - 1, selectedIndex + delta))
+        } else {
+            var r = selectedIndex / gridColumns
+            var c = selectedIndex % gridColumns
+            // Vertical navigation
+            if rowDelta != 0 {
+                r = allowWrap ? (r + rowDelta + gridRows) % gridRows : max(0, min(gridRows - 1, r + rowDelta))
             }
-        }
-
-        // 2. Vertical navigation
-        if rowDelta != 0 {
-            let newRow = currentRow + rowDelta
-            if newRow >= 0 && newRow < gridRows {
-                currentRow = newRow
-            } else if allowWrap {
-                currentRow = (newRow + gridRows) % gridRows
+            let countInRow = min(gridColumns, windows.count - r * gridColumns)
+            // Horizontal navigation
+            if colDelta != 0 {
+                c = allowWrap ? (c + colDelta + countInRow) % countInRow : max(0, min(countInRow - 1, c + colDelta))
+            } else {
+                c = min(c, countInRow - 1)
             }
-            let countInTargetRow = min(gridColumns, windows.count - currentRow * gridColumns)
-            currentCol = min(currentCol, countInTargetRow - 1)
+            selectedIndex = max(0, min(windows.count - 1, r * gridColumns + c))
         }
-
-        let targetIndex = currentRow * gridColumns + currentCol
-        selectedIndex = max(0, min(targetIndex, windows.count - 1))
-        updateCardHighlights()
-        scrollToSelectedCard()
-    }
-
-    var totalWindowsCount: Int {
-        windows.count
-    }
-
-    var currentGridColumns: Int {
-        gridColumns
-    }
-
-    var currentGridRows: Int {
-        gridRows
-    }
-
-    func select(index: Int) {
-        guard index >= 0 && index < windows.count else { return }
-        selectedIndex = index
-        updateCardHighlights()
-        scrollToSelectedCard()
+        updateHighlightsAndScroll()
     }
 
     func selectGrid(row: Int, col: Int) {
         guard !windows.isEmpty else { return }
-        let clampedRow = max(0, min(row, gridRows - 1))
-        let countInTargetRow = min(gridColumns, windows.count - clampedRow * gridColumns)
-        let clampedCol = max(0, min(col, max(0, countInTargetRow - 1)))
-        let targetIndex = min(clampedRow * gridColumns + clampedCol, windows.count - 1)
-        select(index: targetIndex)
+        let r = max(0, min(row, gridRows - 1))
+        let countInRow = min(gridColumns, windows.count - r * gridColumns)
+        let c = max(0, min(col, max(0, countInRow - 1)))
+        select(index: min(r * gridColumns + c, windows.count - 1))
     }
 
-    func removeSelectedWindow() {
-        guard !windows.isEmpty, selectedIndex >= 0, selectedIndex < windows.count else { return }
-        windows.remove(at: selectedIndex)
-        if windows.isEmpty {
-            dismiss()
-            return
-        }
-        selectedIndex = min(selectedIndex, windows.count - 1)
-        buildCards()
-        updateLayoutAndPosition()
-        updateCardHighlights()
-        scrollToSelectedCard()
+    func select(index: Int) {
+        guard windows.indices.contains(index), index != selectedIndex else { return }
+        selectedIndex = index
+        updateHighlightsAndScroll()
     }
 
-    func removeAllWindows(forApp app: NSRunningApplication) {
-        windows.removeAll { $0.app.processIdentifier == app.processIdentifier }
+    func closeSelectedWindow() {
+        guard let item = selectedItem else { return }
+        WindowEngine.shared.removeWindow(item)
+        closeWindow(item)
+        removeCurrent(where: { $0 == item })
+    }
+
+    func quitSelectedApp() {
+        guard let item = selectedItem else { return }
+        item.app.terminate()
+        removeCurrent(where: { $0.app.processIdentifier == item.app.processIdentifier })
+    }
+
+    private func removeCurrent(where predicate: (WindowItem) -> Bool) {
+        windows.removeAll(where: predicate)
         if windows.isEmpty {
             dismiss()
-            return
+        } else {
+            selectedIndex = min(selectedIndex, windows.count - 1)
+            render()
         }
-        selectedIndex = min(selectedIndex, windows.count - 1)
-        buildCards()
-        updateLayoutAndPosition()
-        updateCardHighlights()
-        scrollToSelectedCard()
+    }
+
+    func commit() {
+        guard let item = selectedItem else { dismiss(); return }
+        dismiss()
+        activateWindow(item)
     }
 
     func dismiss() {
@@ -318,112 +221,100 @@ final class SwitcherPanel: NSPanel {
         cardViews.removeAll()
         cardsContainer.subviews.forEach { $0.removeFromSuperview() }
         windows.removeAll()
-        onCancel?()
     }
 
-    func commit() {
-        guard !windows.isEmpty else {
-            dismiss()
-            return
-        }
-        let item = windows[selectedIndex]
-        dismiss()
-        onCommit?(item)
+    private func render() {
+        buildCards()
+        updateLayout()
+        updateHighlightsAndScroll()
     }
 
     private func buildCards() {
         cardViews.removeAll()
         cardsContainer.subviews.forEach { $0.removeFromSuperview() }
 
-        let cardWidth: CGFloat = 190
-        let cardHeight: CGFloat = 155
-        let spacing: CGFloat = 14
-        let margin: CGFloat = 16
+        let cardW: CGFloat = 190, cardH: CGFloat = 155, spacing: CGFloat = 14, margin: CGFloat = 16
+        let n = windows.count
+        gridColumns = n <= 4 ? n : min(5, Int(ceil(Double(n) / 2.0)))
+        gridRows = Int(ceil(Double(n) / Double(gridColumns)))
 
-        let totalCount = windows.count
-        if totalCount <= 4 {
-            gridColumns = totalCount
-            gridRows = 1
-        } else {
-            gridColumns = min(5, Int(ceil(Double(totalCount) / 2.0)))
-            gridRows = Int(ceil(Double(totalCount) / Double(gridColumns)))
-        }
-
-        let maxCols = min(gridColumns, totalCount)
-        let totalGridWidth = margin * 2 + CGFloat(maxCols) * cardWidth + CGFloat(max(0, maxCols - 1)) * spacing
-        let totalGridHeight = margin * 2 + CGFloat(gridRows) * cardHeight + CGFloat(max(0, gridRows - 1)) * spacing
+        let maxCols = min(gridColumns, n)
+        let totalW = margin * 2 + CGFloat(maxCols) * cardW + CGFloat(max(0, maxCols - 1)) * spacing
+        let totalH = margin * 2 + CGFloat(gridRows) * cardH + CGFloat(max(0, gridRows - 1)) * spacing
 
         for r in 0..<gridRows {
-            let startIndex = r * gridColumns
-            let endIndex = min(startIndex + gridColumns, totalCount)
-            let countInRow = endIndex - startIndex
-            let rowWidth = CGFloat(countInRow) * cardWidth + CGFloat(max(0, countInRow - 1)) * spacing
-            let rowXOffset = (totalGridWidth - margin * 2 - rowWidth) / 2
+            let start = r * gridColumns, count = min(gridColumns, n - start)
+            let rowW = CGFloat(count) * cardW + CGFloat(max(0, count - 1)) * spacing
+            let rowX = (totalW - margin * 2 - rowW) / 2
 
-            for c in 0..<countInRow {
-                let index = startIndex + c
-                let window = windows[index]
-
-                let x = margin + rowXOffset + CGFloat(c) * (cardWidth + spacing)
-                let y = margin + CGFloat(gridRows - 1 - r) * (cardHeight + spacing)
-                let cardFrame = NSRect(x: x, y: y, width: cardWidth, height: cardHeight)
-
-                let card = SwitcherCardView(index: index, window: window, frame: cardFrame)
-                card.onClick = { [weak self] clickedIndex in
-                    self?.selectedIndex = clickedIndex
-                    self?.commit()
-                }
-                card.onHover = { [weak self] hoveredIndex in
-                    self?.selectedIndex = hoveredIndex
-                    self?.updateCardHighlights()
-                }
-
+            for c in 0..<count {
+                let idx = start + c
+                let x = margin + rowX + CGFloat(c) * (cardW + spacing)
+                let y = margin + CGFloat(gridRows - 1 - r) * (cardH + spacing)
+                let card = SwitcherCardView(index: idx, window: windows[idx], frame: NSRect(x: x, y: y, width: cardW, height: cardH))
+                card.onClick = { [weak self] i in self?.selectedIndex = i; self?.commit() }
+                card.onHover = { [weak self] i in self?.selectedIndex = i; self?.updateHighlightsAndScroll(scroll: false) }
                 cardsContainer.addSubview(card)
                 cardViews.append(card)
             }
         }
-
-        cardsContainer.frame = NSRect(x: 0, y: 0, width: totalGridWidth, height: totalGridHeight)
+        cardsContainer.frame = NSRect(x: 0, y: 0, width: totalW, height: totalH)
     }
 
-    private func updateLayoutAndPosition() {
-        let activeScreen = currentActiveScreen()
-        let screenVisibleFrame = activeScreen.visibleFrame
-
-        let naturalWidth = cardsContainer.frame.width
-        let naturalHeight = cardsContainer.frame.height
-
-        let maxAvailableWidth = screenVisibleFrame.width - 60
-        let maxAvailableHeight = screenVisibleFrame.height - 60
-
-        let panelWidth = min(naturalWidth, maxAvailableWidth)
-        let panelHeight = min(naturalHeight, maxAvailableHeight)
-
-        visualEffectView.frame = NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight)
+    private func updateLayout() {
+        let screen = NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }) ?? NSScreen.main ?? NSScreen()
+        let visible = screen.visibleFrame
+        let w = min(cardsContainer.frame.width, visible.width - 60)
+        let h = min(cardsContainer.frame.height, visible.height - 60)
+        visualEffectView.frame = NSRect(x: 0, y: 0, width: w, height: h)
         scrollView.frame = visualEffectView.bounds
-
-        let panelX = screenVisibleFrame.midX - (panelWidth / 2)
-        let panelY = screenVisibleFrame.midY - (panelHeight / 2)
-        setFrame(NSRect(x: panelX, y: panelY, width: panelWidth, height: panelHeight), display: true)
+        setFrame(NSRect(x: visible.midX - w / 2, y: visible.midY - h / 2, width: w, height: h), display: true)
     }
 
-    private func updateCardHighlights() {
-        for (index, card) in cardViews.enumerated() {
-            card.isCardSelected = (index == selectedIndex)
+    private func updateHighlightsAndScroll(scroll: Bool = true) {
+        for (i, card) in cardViews.enumerated() { card.isCardSelected = (i == selectedIndex) }
+        if scroll && cardViews.indices.contains(selectedIndex) {
+            cardsContainer.scrollToVisible(cardViews[selectedIndex].frame.insetBy(dx: -16, dy: -16))
         }
     }
 
-    private func scrollToSelectedCard() {
-        guard selectedIndex < cardViews.count else { return }
-        let targetCard = cardViews[selectedIndex]
-        cardsContainer.scrollToVisible(targetCard.frame.insetBy(dx: -16, dy: -16))
+    private func closeWindow(_ item: WindowItem) {
+        var btn: AnyObject?
+        // 1. Try standard close button
+        if AXUIElementCopyAttributeValue(item.axWindow, kAXCloseButtonAttribute as CFString, &btn) == .success, let b = btn {
+            AXUIElementPerformAction(b as! AXUIElement, kAXPressAction as CFString)
+            return
+        }
+        // 2. Try perform close / cancel action directly on window
+        if AXUIElementPerformAction(item.axWindow, "AXClose" as CFString) != .success {
+            AXUIElementPerformAction(item.axWindow, "AXCancel" as CFString)
+        }
     }
 
-    private func currentActiveScreen() -> NSScreen {
-        let mouseLoc = NSEvent.mouseLocation
-        if let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLoc, $0.frame, false) }) {
-            return screen
+    private func activateWindow(_ item: WindowItem) {
+        WindowEngine.shared.promoteToMRUFront(item)
+        let win = item.axWindow, app = item.app
+
+        // 1. Unminimize if minimized
+        var minVal: AnyObject?
+        if AXUIElementCopyAttributeValue(win, kAXMinimizedAttribute as CFString, &minVal) == .success, (minVal as? Bool) == true {
+            AXUIElementSetAttributeValue(win, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
         }
-        return NSScreen.main ?? NSScreen.screens.first ?? NSScreen()
+
+        // 2. Set window focus and main attributes
+        AXUIElementSetAttributeValue(win, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(win, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+
+        // 3. Raise the window
+        AXUIElementPerformAction(win, kAXRaiseAction as CFString)
+
+        // 4. Set application to frontmost and activate
+        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetAttributeValue(appEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        if #available(macOS 14.0, *) {
+            app.activate()
+        } else {
+            app.activate(options: [.activateIgnoringOtherApps])
+        }
     }
 }

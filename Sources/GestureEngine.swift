@@ -24,7 +24,6 @@ final class GestureEngine {
 
     // Switcher state
     private var switcherActive = false
-    private var hasActivatedSwipe = false
     private var gestureOriginX: Float = 0
     private var gestureOriginY: Float = 0
     private var gestureBaseRow: Int = 0
@@ -44,19 +43,24 @@ final class GestureEngine {
     // ------------------------------------------------------------------
 
     func start() {
-        guard let device = MTDeviceCreateDefault() else {
+        guard let dev = MTDeviceCreateDefault() else {
             NSLog("TrackpadGestures: could not create multitouch device — is a trackpad present?")
             return
         }
-        self.device = device
-        MTRegisterContactFrameCallback(device, multitouchTrampoline)
-        MTDeviceStart(device, 0)
+        device = dev
+        MTRegisterContactFrameCallback(dev, multitouchTrampoline)
+        MTDeviceStart(dev, 0)
     }
 
     func stop() {
-        guard let device = device else { return }
-        MTUnregisterContactFrameCallback(device, multitouchTrampoline)
-        MTDeviceStop(device)
+        guard let dev = device else { return }
+        MTUnregisterContactFrameCallback(dev, multitouchTrampoline)
+        MTDeviceStop(dev)
+    }
+
+    /// Pure primitive state check; safe to call from background multitouch thread without instantiating UI.
+    var isGestureInProgress: Bool {
+        lastCount > 0 || sessionPeakFingers > 0 || switcherActive
     }
 
     fileprivate func handleFrame(_ touches: [MTTouch], count: Int32) {
@@ -73,16 +77,21 @@ final class GestureEngine {
         // Lock out 3-finger gestures if 4 or more fingers touch the pad
         if count >= 4 || sessionPeakFingers >= 4 {
             if switcherActive {
-                SwitcherController.shared.cancel()
+                SwitcherPanel.shared.dismiss()
                 switcherActive = false
             }
-            hasActivatedSwipe = false
         }
 
         // Session boundaries
         if count != lastCount {
             if lastCount == 0 && count > 0 {
-                beginSession(touches: touches, now: now, count: count)
+                sessionStartTime = now
+                sessionPeakFingers = count
+                hasCalibratedThreeFingers = false
+                threeFingerMaxDrift = 0
+                switcherActive = SwitcherPanel.shared.isVisible
+                if switcherActive { gestureBaseRow = 0; gestureBaseCol = 0 }
+                if count == 3 { calibrateThreeFingerOrigin(touches: touches, now: now) }
             } else if count == 0 && lastCount > 0 {
                 endSession(now: now)
             }
@@ -95,62 +104,32 @@ final class GestureEngine {
         }
     }
 
-    private func beginSession(touches: [MTTouch], now: CFTimeInterval, count: Int32) {
-        sessionStartTime = now
-        sessionPeakFingers = count
-        hasCalibratedThreeFingers = false
-        threeFingerMaxDrift = 0
-        hasActivatedSwipe = false
-
-        if count == 3 {
-            calibrateThreeFingerOrigin(touches: touches, now: now)
-        }
-
-        if SwitcherController.shared.isVisible {
-            switcherActive = true
-            hasActivatedSwipe = true
-            gestureBaseRow = 0
-            gestureBaseCol = 0
-        } else {
-            switcherActive = false
-        }
-    }
-
     private func calibrateThreeFingerOrigin(touches: [MTTouch], now: CFTimeInterval) {
-        let avg = averagePosition(touches)
+        let (avgX, avgY) = averagePosition(touches)
         threeFingerStartTime = now
-        threeFingerOriginX = avg.x
-        threeFingerOriginY = avg.y
+        threeFingerOriginX = avgX
+        threeFingerOriginY = avgY
         threeFingerMaxDrift = 0
         hasCalibratedThreeFingers = true
     }
 
     private func endSession(now: CFTimeInterval) {
         if switcherActive {
-            SwitcherController.shared.commit()
+            SwitcherPanel.shared.commit()
             switcherActive = false
-            hasActivatedSwipe = false
-            hasCalibratedThreeFingers = false
             sessionPeakFingers = 0
+            hasCalibratedThreeFingers = false
             return
         }
 
-        let peak = sessionPeakFingers
-        let wasSwipe = hasActivatedSwipe
-        let calibrated = hasCalibratedThreeFingers
-        let drift = threeFingerMaxDrift
-        let duration = now - (calibrated ? threeFingerStartTime : sessionStartTime)
-
-        // Reset session state
+        let duration = now - (hasCalibratedThreeFingers ? threeFingerStartTime : sessionStartTime)
+        let isTap = sessionPeakFingers == 3 && duration <= tapMaxDuration && threeFingerMaxDrift <= tapMaxDrift
         sessionPeakFingers = 0
-        hasActivatedSwipe = false
         hasCalibratedThreeFingers = false
-        threeFingerMaxDrift = 0
 
-        // Check middle click tap conditions
-        guard !wasSwipe, peak == 3, duration <= tapMaxDuration, drift <= tapMaxDrift else { return }
-
-        ActionPoster.postMiddleClick()
+        if isTap {
+            Self.postMiddleClick()
+        }
     }
 
     private func trackThreeFinger(touches: [MTTouch], now: CFTimeInterval) {
@@ -158,25 +137,23 @@ final class GestureEngine {
             calibrateThreeFingerOrigin(touches: touches, now: now)
         }
 
-        let avg = averagePosition(touches)
-        let dx = avg.x - threeFingerOriginX
-        let dy = avg.y - threeFingerOriginY
+        let (avgX, avgY) = averagePosition(touches)
+        let dx = avgX - threeFingerOriginX
+        let dy = avgY - threeFingerOriginY
         let distance = hypot(dx, dy)
         threeFingerMaxDrift = max(threeFingerMaxDrift, distance)
 
-        if !switcherActive && !hasActivatedSwipe {
+        if !switcherActive {
             // Activate switcher once movement crosses activation threshold
             if distance >= swipeActivationThreshold {
-                hasActivatedSwipe = true
                 switcherActive = true
-
                 let initialDirection = dx >= 0 ? 1 : -1
-                SwitcherController.shared.showWindowSwitcher(initialDirection: initialDirection)
+                SwitcherPanel.shared.show(initialDirection: initialDirection)
 
-                gestureOriginX = avg.x
-                gestureOriginY = avg.y
-                let initialIndex = (initialDirection > 0 && SwitcherController.shared.totalWindowsCount > 1) ? 1 : 0
-                let cols = max(1, SwitcherController.shared.gridColumns)
+                gestureOriginX = avgX
+                gestureOriginY = avgY
+                let initialIndex = (initialDirection > 0 && SwitcherPanel.shared.windows.count > 1) ? 1 : 0
+                let cols = max(1, SwitcherPanel.shared.gridColumns)
                 gestureBaseRow = initialIndex / cols
                 gestureBaseCol = initialIndex % cols
             }
@@ -184,34 +161,42 @@ final class GestureEngine {
         }
 
         // Direct 1-to-1 Spatial 2D Physical Tracking:
-        let relX = avg.x - gestureOriginX
-        let relY = avg.y - gestureOriginY
+        let relX = avgX - gestureOriginX
+        let relY = avgY - gestureOriginY
 
         let colOffset = Int(round(relX / switchStepDistanceX))
         // Trackpad Multitouch: moving fingers UP increases avg.y (towards screen), relY > 0 -> rowOffset is negative (towards top row 0)
         // Moving fingers DOWN decreases avg.y (towards wrist), relY < 0 -> rowOffset is positive (towards bottom row)
         let rowOffset = -Int(round(relY / switchStepDistanceY))
 
-        let targetRow = gestureBaseRow + rowOffset
-        let targetCol = gestureBaseCol + colOffset
-
-        SwitcherController.shared.selectGrid(row: targetRow, col: targetCol)
-    }
-
-    var isGestureInProgress: Bool {
-        lastCount > 0 || sessionPeakFingers > 0 || switcherActive || SwitcherController.shared.isVisible
+        SwitcherPanel.shared.selectGrid(row: gestureBaseRow + rowOffset, col: gestureBaseCol + colOffset)
     }
 
     private func averagePosition(_ touches: [MTTouch]) -> (x: Float, y: Float) {
         guard !touches.isEmpty else { return (threeFingerOriginX, threeFingerOriginY) }
-        var sx: Float = 0
-        var sy: Float = 0
-        for t in touches {
-            sx += t.normalized.position.x
-            sy += t.normalized.position.y
-        }
+        let sx = touches.reduce(0) { $0 + $1.normalized.position.x }
+        let sy = touches.reduce(0) { $0 + $1.normalized.position.y }
         let n = Float(touches.count)
         return (sx / n, sy / n)
+    }
+
+    // MARK: - Three-finger tap → middle click
+
+    static func postMiddleClick() {
+        let loc = NSEvent.mouseLocation
+        let screenHeight = NSScreen.screens.first?.frame.height ?? 0
+        let point = CGPoint(x: loc.x, y: screenHeight - loc.y) // flip to CG's top-left origin
+
+        guard
+            let down = CGEvent(mouseEventSource: nil, mouseType: .otherMouseDown, mouseCursorPosition: point, mouseButton: .center),
+            let up = CGEvent(mouseEventSource: nil, mouseType: .otherMouseUp, mouseCursorPosition: point, mouseButton: .center)
+        else { return }
+
+        down.setIntegerValueField(.mouseEventButtonNumber, value: 2)
+        up.setIntegerValueField(.mouseEventButtonNumber, value: 2)
+
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     }
 }
 
@@ -237,4 +222,3 @@ private func multitouchTrampoline(device: MTDeviceRef?, data: UnsafeMutablePoint
     }
     return 0
 }
-
