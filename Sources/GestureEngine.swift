@@ -7,10 +7,19 @@ import AppKit
 final class GestureEngine {
     static let shared = GestureEngine()
 
-    private var device: MTDeviceRef?
+    private var devices: [MTDeviceRef] = []
     private let debug = ProcessInfo.processInfo.environment["TPG_DEBUG"] != nil
+    private var wakeObservers: [NSObjectProtocol] = []
 
-    // Touch tracking state
+    // Thread-safe synchronization and touch state for scroll suppression
+    private let lock = NSLock()
+    private var rawFingerCount: Int32 = 0
+    private var lastThreeFingerTimestamp: CFTimeInterval = 0
+    private var gestureEndTimestamp: CFTimeInterval = 0
+    private var isThreeFingerActive: Bool = false
+    private var isTrackingTouchSession: Bool = false
+
+    // Touch tracking state (accessed on Main thread)
     private var lastCount: Int32 = 0
     private var sessionPeakFingers: Int32 = 0
     private var sessionStartTime: CFTimeInterval = 0
@@ -30,7 +39,7 @@ final class GestureEngine {
     private var gestureBaseCol: Int = 0
 
     // --- Tunables ---------------------------------------------------------
-    /// Distance fingers must move from touchdown to activate the switcher.
+    /// Horizontal distance fingers must move from touchdown to activate the switcher.
     private let swipeActivationThreshold: Float = 0.035
     /// Maximum finger drift permitted during a 3-finger tap for middle click.
     private let tapMaxDrift: Float = 0.055
@@ -42,25 +51,158 @@ final class GestureEngine {
     private let switchStepDistanceY: Float = 0.085
     // ------------------------------------------------------------------
 
-    func start() {
-        guard let dev = MTDeviceCreateDefault() else {
-            NSLog("TrackpadGestures: could not create multitouch device — is a trackpad present?")
-            return
+    init() {
+        setupWakeObservers()
+    }
+
+    private func setupWakeObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+        let o1 = center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.restart()
         }
-        device = dev
-        MTRegisterContactFrameCallback(dev, multitouchTrampoline)
-        MTDeviceStart(dev, 0)
+        let o2 = center.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.restart()
+        }
+        wakeObservers = [o1, o2]
+    }
+
+    func start() {
+        stop()
+
+        var registeredDevices: [MTDeviceRef] = []
+
+        if let rawList = MTDeviceCreateList() {
+            let unmanagedList = rawList.takeRetainedValue()
+            let count = CFArrayGetCount(unmanagedList)
+            for i in 0..<count {
+                if let ptr = CFArrayGetValueAtIndex(unmanagedList, i) {
+                    let dev = UnsafeMutableRawPointer(mutating: ptr)
+                    MTRegisterContactFrameCallback(dev, multitouchTrampoline)
+                    MTDeviceStart(dev, 0)
+                    registeredDevices.append(dev)
+                }
+            }
+        }
+
+        if registeredDevices.isEmpty {
+            if let def = MTDeviceCreateDefault() {
+                MTRegisterContactFrameCallback(def, multitouchTrampoline)
+                MTDeviceStart(def, 0)
+                registeredDevices.append(def)
+            } else {
+                NSLog("TrackpadGestures: could not create multitouch device — is a trackpad present?")
+            }
+        }
+
+        devices = registeredDevices
     }
 
     func stop() {
-        guard let dev = device else { return }
-        MTUnregisterContactFrameCallback(dev, multitouchTrampoline)
-        MTDeviceStop(dev)
+        for dev in devices {
+            MTUnregisterContactFrameCallback(dev, multitouchTrampoline)
+            MTDeviceStop(dev)
+        }
+        devices.removeAll()
+        resetSessionState()
+    }
+
+    func restart() {
+        stop()
+        start()
     }
 
     /// Pure primitive state check; safe to call from background multitouch thread without instantiating UI.
     var isGestureInProgress: Bool {
-        lastCount > 0 || sessionPeakFingers > 0 || switcherActive
+        lock.lock()
+        let inProgress = isThreeFingerActive || rawFingerCount > 0
+        lock.unlock()
+        return inProgress || switcherActive
+    }
+
+    /// Resets all internal gesture tracking states. Called when gestures end or UI dismisses.
+    func resetSessionState() {
+        lock.lock()
+        rawFingerCount = 0
+        isThreeFingerActive = false
+        gestureEndTimestamp = CACurrentMediaTime()
+        isTrackingTouchSession = false
+        lock.unlock()
+
+        lastCount = 0
+        sessionPeakFingers = 0
+        sessionStartTime = 0
+        threeFingerStartTime = 0
+        threeFingerOriginX = 0
+        threeFingerOriginY = 0
+        threeFingerMaxDrift = 0
+        hasCalibratedThreeFingers = false
+        switcherActive = false
+    }
+
+    func markGestureEnded() {
+        lock.lock()
+        gestureEndTimestamp = CACurrentMediaTime()
+        isThreeFingerActive = false
+        lock.unlock()
+        switcherActive = false
+    }
+
+    /// Returns true if scroll wheel events should be dropped to prevent scrolling open background apps.
+    var shouldSuppressScroll: Bool {
+        let now = CACurrentMediaTime()
+        lock.lock()
+        let touchingThree = isThreeFingerActive || rawFingerCount >= 3
+        let recentThreeFinger = (now - lastThreeFingerTimestamp) < 0.35
+        let recentGestureEnd = (now - gestureEndTimestamp) < 0.35
+        lock.unlock()
+
+        if touchingThree || recentThreeFinger || recentGestureEnd {
+            return true
+        }
+        if switcherActive || SwitcherPanel.shared.isVisible {
+            return true
+        }
+        return false
+    }
+
+    /// Entry point from C callback running on private Multitouch thread.
+    fileprivate func handleMultitouchFrame(data: UnsafeMutablePointer<MTTouch>?, count: Int32) {
+        let now = CACurrentMediaTime()
+
+        lock.lock()
+        rawFingerCount = count
+        if count >= 3 {
+            lastThreeFingerTimestamp = now
+            isThreeFingerActive = true
+        } else if count == 0 {
+            if isThreeFingerActive {
+                gestureEndTimestamp = now
+                isThreeFingerActive = false
+            }
+        }
+
+        let wasTracking = isTrackingTouchSession
+        if count >= 3 {
+            isTrackingTouchSession = true
+        } else if count == 0 {
+            isTrackingTouchSession = false
+        }
+        let shouldDispatchFrame = (count >= 3) || (count == 0 && (wasTracking || switcherActive)) || (count > 0 && (wasTracking || switcherActive))
+        lock.unlock()
+
+        guard shouldDispatchFrame else { return }
+
+        if let data = data, count > 0 {
+            let buffer = UnsafeBufferPointer(start: data, count: Int(count))
+            let touches = Array(buffer)
+            DispatchQueue.main.async { [weak self] in
+                self?.handleFrame(touches, count: count)
+            }
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.handleFrame([], count: 0)
+            }
+        }
     }
 
     fileprivate func handleFrame(_ touches: [MTTouch], count: Int32) {
@@ -70,9 +212,12 @@ final class GestureEngine {
             NSLog("TPG frame: count=\(count) states=\(touches.map { $0.state })")
         }
 
-        if count > 0 {
-            sessionPeakFingers = max(sessionPeakFingers, count)
+        if count == 0 {
+            endSession(now: now)
+            return
         }
+
+        sessionPeakFingers = max(sessionPeakFingers, count)
 
         // Lock out 3-finger gestures if 4 or more fingers touch the pad
         if count >= 4 || sessionPeakFingers >= 4 {
@@ -80,23 +225,20 @@ final class GestureEngine {
                 SwitcherPanel.shared.dismiss()
                 switcherActive = false
             }
+            return
         }
 
-        // Session boundaries
-        if count != lastCount {
-            if lastCount == 0 && count > 0 {
-                sessionStartTime = now
-                sessionPeakFingers = count
-                hasCalibratedThreeFingers = false
-                threeFingerMaxDrift = 0
-                switcherActive = SwitcherPanel.shared.isVisible
-                if switcherActive { gestureBaseRow = 0; gestureBaseCol = 0 }
-                if count == 3 { calibrateThreeFingerOrigin(touches: touches, now: now) }
-            } else if count == 0 && lastCount > 0 {
-                endSession(now: now)
-            }
-            lastCount = count
+        // Session start boundary
+        if lastCount == 0 && count > 0 {
+            sessionStartTime = now
+            sessionPeakFingers = count
+            hasCalibratedThreeFingers = false
+            threeFingerMaxDrift = 0
+            switcherActive = SwitcherPanel.shared.isVisible
+            if switcherActive { gestureBaseRow = 0; gestureBaseCol = 0 }
+            if count == 3 { calibrateThreeFingerOrigin(touches: touches, now: now) }
         }
+        lastCount = count
 
         // Process 3-finger tracking
         if count == 3 && sessionPeakFingers == 3 {
@@ -116,16 +258,16 @@ final class GestureEngine {
     private func endSession(now: CFTimeInterval) {
         if switcherActive {
             SwitcherPanel.shared.commit()
-            switcherActive = false
-            sessionPeakFingers = 0
-            hasCalibratedThreeFingers = false
+            resetSessionState()
             return
         }
 
+        markGestureEnded()
+
         let duration = now - (hasCalibratedThreeFingers ? threeFingerStartTime : sessionStartTime)
         let isTap = sessionPeakFingers == 3 && duration <= tapMaxDuration && threeFingerMaxDrift <= tapMaxDrift
-        sessionPeakFingers = 0
-        hasCalibratedThreeFingers = false
+
+        resetSessionState()
 
         if isTap {
             Self.postMiddleClick()
@@ -144,18 +286,18 @@ final class GestureEngine {
         threeFingerMaxDrift = max(threeFingerMaxDrift, distance)
 
         if !switcherActive {
-            // Activate switcher once movement crosses activation threshold
-            if distance >= swipeActivationThreshold {
-                switcherActive = true
-                let initialDirection = dx >= 0 ? 1 : -1
-                SwitcherPanel.shared.show(initialDirection: initialDirection)
-
-                gestureOriginX = avgX
-                gestureOriginY = avgY
-                let initialIndex = (initialDirection > 0 && SwitcherPanel.shared.windows.count > 1) ? 1 : 0
-                let cols = max(1, SwitcherPanel.shared.gridColumns)
-                gestureBaseRow = initialIndex / cols
-                gestureBaseCol = initialIndex % cols
+            // Activate switcher only on horizontal swipe (left or right) crossing activation threshold
+            if abs(dx) >= swipeActivationThreshold && abs(dx) > abs(dy) {
+                let initialDirection = dx > 0 ? 1 : -1
+                if SwitcherPanel.shared.show(initialDirection: initialDirection) {
+                    switcherActive = true
+                    gestureOriginX = avgX
+                    gestureOriginY = avgY
+                    let initialIndex = SwitcherPanel.shared.selectedIndex
+                    let cols = max(1, SwitcherPanel.shared.gridColumns)
+                    gestureBaseRow = initialIndex / cols
+                    gestureBaseCol = initialIndex % cols
+                }
             }
             return
         }
@@ -202,23 +344,6 @@ final class GestureEngine {
 
 // MARK: - C trampoline
 private func multitouchTrampoline(device: MTDeviceRef?, data: UnsafeMutablePointer<MTTouch>?, numFingers: Int32, timestamp: Double, frame: Int32) -> Int32 {
-    guard let data = data, numFingers > 0 else {
-        if GestureEngine.shared.isGestureInProgress {
-            DispatchQueue.main.async {
-                GestureEngine.shared.handleFrame([], count: 0)
-            }
-        }
-        return 0
-    }
-
-    if numFingers < 3 && !GestureEngine.shared.isGestureInProgress {
-        return 0
-    }
-
-    let buffer = UnsafeBufferPointer(start: data, count: Int(numFingers))
-    let touches = Array(buffer)
-    DispatchQueue.main.async {
-        GestureEngine.shared.handleFrame(touches, count: numFingers)
-    }
+    GestureEngine.shared.handleMultitouchFrame(data: data, count: numFingers)
     return 0
 }

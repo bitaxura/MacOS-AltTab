@@ -25,10 +25,12 @@ typedef struct {
 typedef void *MTDeviceRef;
 typedef int (*MTContactCallbackFunction)(MTDeviceRef device, MTTouch *data, int32_t numFingers, double timestamp, int32_t frame);
 
+extern CFMutableArrayRef MTDeviceCreateList(void);
 extern MTDeviceRef MTDeviceCreateDefault(void);
 extern void MTRegisterContactFrameCallback(MTDeviceRef device, MTContactCallbackFunction callback);
 extern void MTUnregisterContactFrameCallback(MTDeviceRef device, MTContactCallbackFunction callback);
 extern void MTDeviceStart(MTDeviceRef device, int32_t mode);
 extern void MTDeviceStop(MTDeviceRef device);
+extern bool MTDeviceIsRunning(MTDeviceRef device);
 
 #endif

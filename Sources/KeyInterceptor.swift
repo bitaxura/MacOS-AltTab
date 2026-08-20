@@ -11,9 +11,10 @@ final class KeyInterceptor {
 
     func start() {
         let mask = CGEventMask(
-            (1 << CGEventType.keyDown.rawValue) |
-            (1 << CGEventType.keyUp.rawValue) |
-            (1 << CGEventType.flagsChanged.rawValue)
+            (CGEventMask(1) << CGEventType.keyDown.rawValue) |
+            (CGEventMask(1) << CGEventType.keyUp.rawValue) |
+            (CGEventMask(1) << CGEventType.flagsChanged.rawValue) |
+            (CGEventMask(1) << CGEventType.scrollWheel.rawValue)
         )
 
         // Try HID event tap first to intercept Cmd+Tab before macOS Dock, with fallback to Session tap
@@ -21,7 +22,7 @@ final class KeyInterceptor {
             ?? CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: keyCallback, userInfo: nil)
 
         guard let validTap = tap else {
-            NSLog("TrackpadGestures: failed to create key interceptor — check Input Monitoring permission")
+            NSLog("TrackpadGestures: failed to create key/event interceptor — check Input Monitoring permission")
             return
         }
 
@@ -35,6 +36,13 @@ final class KeyInterceptor {
     fileprivate func handleCallback(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return Unmanaged.passRetained(event)
+        }
+
+        if type == .scrollWheel {
+            if GestureEngine.shared.shouldSuppressScroll {
+                return nil
+            }
             return Unmanaged.passRetained(event)
         }
 

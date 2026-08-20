@@ -126,13 +126,15 @@ final class SwitcherPanel: NSPanel {
         windows.indices.contains(selectedIndex) ? windows[selectedIndex] : nil
     }
 
-    func show(initialDirection: Int = 1) {
+    @discardableResult
+    func show(initialDirection: Int = 1) -> Bool {
         let wins = WindowEngine.shared.windows()
-        guard !wins.isEmpty else { return }
+        guard !wins.isEmpty else { return false }
         windows = wins
         selectedIndex = initialDirection > 0 ? (wins.count > 1 ? 1 : 0) : max(0, wins.count - 1)
         render()
         orderFrontRegardless()
+        return true
     }
 
     func step(direction: Int) {
@@ -197,7 +199,8 @@ final class SwitcherPanel: NSPanel {
     func quitSelectedApp() {
         guard let item = selectedItem else { return }
         item.app.terminate()
-        removeCurrent(where: { $0.app.processIdentifier == item.app.processIdentifier })
+        item.parentApp?.terminate()
+        removeCurrent(where: { $0.app.processIdentifier == item.app.processIdentifier || ($0.parentApp != nil && $0.parentApp?.processIdentifier == item.parentApp?.processIdentifier) })
     }
 
     private func removeCurrent(where predicate: (WindowItem) -> Bool) {
@@ -211,12 +214,14 @@ final class SwitcherPanel: NSPanel {
     }
 
     func commit() {
+        GestureEngine.shared.resetSessionState()
         guard let item = selectedItem else { dismiss(); return }
         dismiss()
         activateWindow(item)
     }
 
     func dismiss() {
+        GestureEngine.shared.resetSessionState()
         orderOut(nil)
         cardViews.removeAll()
         cardsContainer.subviews.forEach { $0.removeFromSuperview() }
@@ -315,6 +320,16 @@ final class SwitcherPanel: NSPanel {
             app.activate()
         } else {
             app.activate(options: [.activateIgnoringOtherApps])
+        }
+
+        if let parentApp = item.parentApp {
+            let parentEl = AXUIElementCreateApplication(parentApp.processIdentifier)
+            AXUIElementSetAttributeValue(parentEl, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+            if #available(macOS 14.0, *) {
+                parentApp.activate()
+            } else {
+                parentApp.activate(options: [.activateIgnoringOtherApps])
+            }
         }
     }
 }

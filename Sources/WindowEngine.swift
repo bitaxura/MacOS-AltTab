@@ -10,6 +10,14 @@ private func axAttr<T>(_ el: AXUIElement, _ key: CFString) -> T? {
     return AXUIElementCopyAttributeValue(el, key, &val) == .success ? (val as? T) : nil
 }
 
+private func axSize(_ el: AXUIElement) -> CGSize? {
+    var val: AnyObject?
+    guard AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &val) == .success,
+          let v = val, CFGetTypeID(v) == AXValueGetTypeID() else { return nil }
+    var size = CGSize.zero
+    return AXValueGetValue(v as! AXValue, .cgSize, &size) ? size : nil
+}
+
 struct WindowItem: Equatable {
     let appName: String
     let subtitle: String?
@@ -18,6 +26,7 @@ struct WindowItem: Equatable {
     let axWindow: AXUIElement
     let cgWindowID: CGWindowID
     let app: NSRunningApplication
+    let parentApp: NSRunningApplication?
 
     static func == (lhs: WindowItem, rhs: WindowItem) -> Bool {
         lhs.cgWindowID != kCGNullWindowID && rhs.cgWindowID != kCGNullWindowID ? lhs.cgWindowID == rhs.cgWindowID : CFEqual(lhs.axWindow, rhs.axWindow)
@@ -28,6 +37,18 @@ final class WindowEngine {
     static let shared = WindowEngine()
     private var mruHistory: [WindowItem] = []
 
+    private static let excludedBundleIDs: Set<String> = [
+        "com.apple.dock",
+        "com.apple.WindowManager",
+        "com.apple.controlcenter",
+        "com.apple.notificationcenterui",
+        "com.apple.systemuiserver",
+        "com.apple.Spotlight",
+        "com.apple.screentimeui",
+        "com.apple.TextInputMenuAgent",
+        "com.apple.TextInputSwitcher"
+    ]
+
     init() {
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
             self?.recordActiveWindow()
@@ -35,7 +56,7 @@ final class WindowEngine {
     }
 
     func recordActiveWindow() {
-        guard let app = NSWorkspace.shared.frontmostApplication, app.activationPolicy == .regular,
+        guard let app = NSWorkspace.shared.frontmostApplication,
               app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
         let appEl = AXUIElementCreateApplication(app.processIdentifier)
         let win: AXUIElement? = axAttr(appEl, kAXFocusedWindowAttribute as CFString) ?? axAttr(appEl, kAXMainWindowAttribute as CFString)
@@ -54,14 +75,35 @@ final class WindowEngine {
     }
 
     func windows() -> [WindowItem] {
-        let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && $0.processIdentifier > 0 }
         let cgList = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
         let layer0 = cgList.filter { ($0[kCGWindowLayer as String] as? Int) == 0 }
+
+        var targetApps: [NSRunningApplication] = []
+        var seenPids = Set<pid_t>()
+
+        // 1. All regular applications
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && app.processIdentifier > 0 {
+            if let bid = app.bundleIdentifier, WindowEngine.excludedBundleIDs.contains(bid) || bid == Bundle.main.bundleIdentifier { continue }
+            if seenPids.insert(app.processIdentifier).inserted {
+                targetApps.append(app)
+            }
+        }
+
+        // 2. Any accessory/helper applications that own visible layer 0 windows (e.g. Steam Helper, Teams Helper)
+        for info in layer0 {
+            if let pid = (info[kCGWindowOwnerPID as String] as? Int).map({ pid_t($0) }), pid > 0, !seenPids.contains(pid) {
+                if let app = NSRunningApplication(processIdentifier: pid) {
+                    if let bid = app.bundleIdentifier, WindowEngine.excludedBundleIDs.contains(bid) || bid == Bundle.main.bundleIdentifier { continue }
+                    seenPids.insert(pid)
+                    targetApps.append(app)
+                }
+            }
+        }
 
         var discovered: [WindowItem] = []
         var byWid: [CGWindowID: WindowItem] = [:]
 
-        for app in apps {
+        for app in targetApps {
             let appEl = AXUIElementCreateApplication(app.processIdentifier)
             let axList: [AXUIElement] = axAttr(appEl, kAXWindowsAttribute as CFString) ?? []
             for axWin in axList {
@@ -79,7 +121,7 @@ final class WindowEngine {
         if let frontApp = NSWorkspace.shared.frontmostApplication, frontApp.bundleIdentifier != Bundle.main.bundleIdentifier {
             let appEl = AXUIElementCreateApplication(frontApp.processIdentifier)
             let win: AXUIElement? = axAttr(appEl, kAXFocusedWindowAttribute as CFString) ?? axAttr(appEl, kAXMainWindowAttribute as CFString)
-            let frontItem = discovered.first(where: { win != nil ? CFEqual($0.axWindow, win!) : $0.app.processIdentifier == frontApp.processIdentifier })
+            let frontItem = discovered.first(where: { win != nil ? CFEqual($0.axWindow, win!) : ($0.app.processIdentifier == frontApp.processIdentifier || $0.parentApp?.processIdentifier == frontApp.processIdentifier) })
             if let front = frontItem {
                 updated.removeAll { $0 == front }
                 updated.insert(front, at: 0)
@@ -106,12 +148,35 @@ final class WindowEngine {
         if !role.isEmpty && role != (kAXWindowRole as String) { return nil }
 
         let subrole: String = axAttr(axWindow, kAXSubroleAttribute as CFString) ?? ""
-        if subrole == "AXDesktopWindow" { return nil }
+        if subrole == "AXDesktopWindow" || subrole == "AXSystemDialog" { return nil }
 
-        let size: CGSize? = axAttr(axWindow, kAXSizeAttribute as CFString)
+        let size: CGSize? = axSize(axWindow)
         if let s = size, (s.width < 50 || s.height < 50) { return nil }
 
-        let appName = app.localizedName ?? app.bundleURL?.lastPathComponent ?? "Application"
+        var appName = app.localizedName ?? app.bundleURL?.lastPathComponent ?? "Application"
+        var appIcon = app.icon
+        var parentApp: NSRunningApplication? = nil
+
+        // Resolve parent application for helper processes (e.g. Steam Helper -> Steam, Teams Helper -> Microsoft Teams)
+        if let bundleId = app.bundleIdentifier, bundleId.hasSuffix(".helper") {
+            let parentBundleId = String(bundleId.dropLast(".helper".count))
+            if let pApp = NSRunningApplication.runningApplications(withBundleIdentifier: parentBundleId).first {
+                parentApp = pApp
+                if let pName = pApp.localizedName, !pName.isEmpty { appName = pName }
+                if let pIcon = pApp.icon { appIcon = pIcon }
+            }
+        }
+        if appName.hasSuffix(" Helper") {
+            let clean = String(appName.dropLast(" Helper".count))
+            if let pApp = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == clean }) {
+                parentApp = pApp
+                appName = pApp.localizedName ?? clean
+                appIcon = pApp.icon ?? appIcon
+            } else {
+                appName = clean
+            }
+        }
+
         var title: String = (axAttr(axWindow, kAXTitleAttribute as CFString) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if title.isEmpty {
             if subrole == "AXUnknown" { return nil }
@@ -137,7 +202,7 @@ final class WindowEngine {
             cgWid = matchingWindowID(for: app, size: size, layer0: layer0)
         }
 
-        return WindowItem(appName: appName, subtitle: subtitle, appIcon: app.icon, title: cleanTitle, axWindow: axWindow, cgWindowID: cgWid, app: app)
+        return WindowItem(appName: appName, subtitle: subtitle, appIcon: appIcon, title: cleanTitle, axWindow: axWindow, cgWindowID: cgWid, app: app, parentApp: parentApp)
     }
 
     private static let profileRegex = try? NSRegularExpression(pattern: #"^(Personal|Work|School|Default|Profile \d+|Guest)\s*[—–-]\s*"#, options: .caseInsensitive)
