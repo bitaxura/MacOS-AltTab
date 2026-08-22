@@ -60,12 +60,13 @@ private final class SwitcherCardView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let existing = trackingArea { removeTrackingArea(existing) }
-        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(area)
         trackingArea = area
     }
 
     override func mouseEntered(with event: NSEvent) { onHover?(index) }
+    override func mouseMoved(with event: NSEvent) { onHover?(index) }
     override func mouseDown(with event: NSEvent) { onClick?(index) }
 
     private func updateSelectionState() {
@@ -88,6 +89,10 @@ final class SwitcherPanel: NSPanel {
     private(set) var gridColumns = 1
     private(set) var gridRows = 1
     private var cardViews: [SwitcherCardView] = []
+
+    private var initialMousePos: NSPoint = .zero
+    private var lastHandledMousePos: NSPoint = .zero
+    private var mouseActivated: Bool = false
 
     private let visualEffectView = NSVisualEffectView()
     private let scrollView = NSScrollView()
@@ -132,6 +137,9 @@ final class SwitcherPanel: NSPanel {
         guard !wins.isEmpty else { return false }
         windows = wins
         selectedIndex = initialDirection > 0 ? (wins.count > 1 ? 1 : 0) : max(0, wins.count - 1)
+        initialMousePos = NSEvent.mouseLocation
+        lastHandledMousePos = initialMousePos
+        mouseActivated = false
         render()
         orderFrontRegardless()
         return true
@@ -144,6 +152,7 @@ final class SwitcherPanel: NSPanel {
         }
         guard !windows.isEmpty else { return }
         selectedIndex = (selectedIndex + (direction > 0 ? 1 : windows.count - 1)) % windows.count
+        lastHandledMousePos = NSEvent.mouseLocation
         updateHighlightsAndScroll()
     }
 
@@ -153,6 +162,7 @@ final class SwitcherPanel: NSPanel {
             return
         }
         guard !windows.isEmpty else { return }
+        lastHandledMousePos = NSEvent.mouseLocation
         if gridRows <= 1 {
             let delta = colDelta + rowDelta
             selectedIndex = allowWrap ? (selectedIndex + delta % windows.count + windows.count) % windows.count : max(0, min(windows.count - 1, selectedIndex + delta))
@@ -186,7 +196,32 @@ final class SwitcherPanel: NSPanel {
     func select(index: Int) {
         guard windows.indices.contains(index), index != selectedIndex else { return }
         selectedIndex = index
+        lastHandledMousePos = NSEvent.mouseLocation
         updateHighlightsAndScroll()
+    }
+
+    func handleCardHover(index: Int) {
+        guard isVisible, windows.indices.contains(index) else { return }
+        let currentPos = NSEvent.mouseLocation
+        if !mouseActivated {
+            let dx = currentPos.x - initialMousePos.x
+            let dy = currentPos.y - initialMousePos.y
+            if hypot(dx, dy) < 5.0 {
+                return
+            }
+            mouseActivated = true
+        } else {
+            let dx = currentPos.x - lastHandledMousePos.x
+            let dy = currentPos.y - lastHandledMousePos.y
+            if hypot(dx, dy) < 2.0 {
+                return
+            }
+        }
+        lastHandledMousePos = currentPos
+        if selectedIndex != index {
+            selectedIndex = index
+            updateHighlightsAndScroll(scroll: false)
+        }
     }
 
     func closeSelectedWindow() {
@@ -226,6 +261,9 @@ final class SwitcherPanel: NSPanel {
         cardViews.removeAll()
         cardsContainer.subviews.forEach { $0.removeFromSuperview() }
         windows.removeAll()
+        mouseActivated = false
+        initialMousePos = .zero
+        lastHandledMousePos = .zero
     }
 
     private func render() {
@@ -258,7 +296,7 @@ final class SwitcherPanel: NSPanel {
                 let y = margin + CGFloat(gridRows - 1 - r) * (cardH + spacing)
                 let card = SwitcherCardView(index: idx, window: windows[idx], frame: NSRect(x: x, y: y, width: cardW, height: cardH))
                 card.onClick = { [weak self] i in self?.selectedIndex = i; self?.commit() }
-                card.onHover = { [weak self] i in self?.selectedIndex = i; self?.updateHighlightsAndScroll(scroll: false) }
+                card.onHover = { [weak self] i in self?.handleCardHover(index: i) }
                 cardsContainer.addSubview(card)
                 cardViews.append(card)
             }
