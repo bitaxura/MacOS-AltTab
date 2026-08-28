@@ -78,6 +78,9 @@ final class WindowEngine {
         let cgList = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
         let layer0 = cgList.filter { ($0[kCGWindowLayer as String] as? Int) == 0 }
 
+        let cgListAll = (CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
+        let allLayer0 = cgListAll.filter { ($0[kCGWindowLayer as String] as? Int) == 0 }
+
         var targetApps: [NSRunningApplication] = []
         var seenPids = Set<pid_t>()
 
@@ -107,7 +110,7 @@ final class WindowEngine {
             let appEl = AXUIElementCreateApplication(app.processIdentifier)
             let axList: [AXUIElement] = axAttr(appEl, kAXWindowsAttribute as CFString) ?? []
             for axWin in axList {
-                guard let item = makeWindowItem(for: axWin, app: app, layer0: layer0) else { continue }
+                guard let item = makeWindowItem(for: axWin, app: app, layer0: layer0, allLayer0: allLayer0) else { continue }
                 discovered.append(item)
                 if item.cgWindowID != kCGNullWindowID { byWid[item.cgWindowID] = item }
             }
@@ -143,7 +146,7 @@ final class WindowEngine {
         return updated
     }
 
-    private func makeWindowItem(for axWindow: AXUIElement, app: NSRunningApplication, layer0: [[String: Any]]) -> WindowItem? {
+    private func makeWindowItem(for axWindow: AXUIElement, app: NSRunningApplication, layer0: [[String: Any]], allLayer0: [[String: Any]]) -> WindowItem? {
         let role: String = axAttr(axWindow, kAXRoleAttribute as CFString) ?? ""
         if !role.isEmpty && role != (kAXWindowRole as String) { return nil }
 
@@ -152,6 +155,50 @@ final class WindowEngine {
 
         let size: CGSize? = axSize(axWindow)
         if let s = size, (s.width < 50 || s.height < 50) { return nil }
+
+        var minVal: AnyObject?
+        let isMinimized = (AXUIElementCopyAttributeValue(axWindow, kAXMinimizedAttribute as CFString, &minVal) == .success) && ((minVal as? Bool) == true)
+
+        // Resolve CGWindowID
+        var cgWid: CGWindowID = kCGNullWindowID
+        var wid: CGWindowID = 0
+        if _AXUIElementGetWindow(axWindow, &wid) == .success && wid > 0 {
+            cgWid = wid
+        } else {
+            // Fallback: match by PID and bounds
+            cgWid = matchingWindowID(for: app, size: size, layer0: layer0)
+        }
+
+        // Determine if window is actively on-screen
+        let isOnScreen = (cgWid != kCGNullWindowID && layer0.contains(where: { ($0[kCGWindowNumber as String] as? Int).map(CGWindowID.init) == cgWid }))
+            || (layer0.contains(where: { ($0[kCGWindowOwnerPID as String] as? Int) == Int(app.processIdentifier) }))
+
+        // Filter out closed / phantom / hidden windows
+        if !isOnScreen && !isMinimized {
+            // If the application is hidden (e.g. Discord closed with Cmd+W, or app hidden with no active window),
+            // exclude it unless it has an explicit open window
+            if app.isHidden {
+                return nil
+            }
+            // Check if there is a valid window on another space
+            let hasSpaceWindow = allLayer0.contains { info in
+                guard let pid = info[kCGWindowOwnerPID as String] as? Int, pid == Int(app.processIdentifier) else { return false }
+                let alpha = info[kCGWindowAlpha as String] as? Double ?? 1.0
+                guard alpha > 0.1 else { return false }
+                if let b = info[kCGWindowBounds as String] as? [String: Any] {
+                    let w = b["Width"] as? Double ?? 0
+                    let h = b["Height"] as? Double ?? 0
+                    if w < 50 || h < 50 { return false }
+                }
+                if cgWid != kCGNullWindowID, let num = (info[kCGWindowNumber as String] as? Int).map(CGWindowID.init) {
+                    return num == cgWid
+                }
+                return true
+            }
+            if !hasSpaceWindow {
+                return nil
+            }
+        }
 
         var appName = app.localizedName ?? app.bundleURL?.lastPathComponent ?? "Application"
         var appIcon = app.icon
@@ -180,6 +227,7 @@ final class WindowEngine {
         var title: String = (axAttr(axWindow, kAXTitleAttribute as CFString) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if title.isEmpty {
             if subrole == "AXUnknown" { return nil }
+            if !isOnScreen && !isMinimized { return nil }
             let doc: String = axAttr(axWindow, kAXDocumentAttribute as CFString) ?? ""
             let desc: String = axAttr(axWindow, kAXDescriptionAttribute as CFString) ?? ""
             title = !doc.isEmpty ? URL(fileURLWithPath: doc).lastPathComponent : (!desc.isEmpty ? desc : appName)
@@ -191,16 +239,6 @@ final class WindowEngine {
         }
 
         let (cleanTitle, subtitle) = parseTitleAndSubtitle(title, appName: appName)
-
-        // Resolve CGWindowID
-        var cgWid: CGWindowID = kCGNullWindowID
-        var wid: CGWindowID = 0
-        if _AXUIElementGetWindow(axWindow, &wid) == .success && wid > 0 {
-            cgWid = wid
-        } else {
-            // Fallback: match by PID and bounds
-            cgWid = matchingWindowID(for: app, size: size, layer0: layer0)
-        }
 
         return WindowItem(appName: appName, subtitle: subtitle, appIcon: appIcon, title: cleanTitle, axWindow: axWindow, cgWindowID: cgWid, app: app, parentApp: parentApp)
     }
