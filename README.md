@@ -30,9 +30,11 @@ Directly connects to Apple's private `MultitouchSupport.framework` to read raw p
 - **3-Finger Tap -> Native Middle Click**:
   - Tap with 3 fingers anywhere on the trackpad to trigger a native Middle Click (`button: 2`).
   - Perfect for opening links in background tabs, closing browser tabs, and panning in 3D/CAD or design software.
-- **Conflict Prevention & Isolation**:
+- **Conflict Prevention & Palm Rejection**:
+  - Multi-layer palm rejection filters out palm heels, resting thumbs, and typing brushes using contact patch area (`size`), ellipse major axis, bottom edge resting margins, and corner exclusion zones.
+  - Spatial cluster validation ensures all 3 fingers are grouped tightly together, rejecting combinations of distant palm rests and scrolling fingers.
+  - Synchronous arrival detection ensures all 3 fingers landed together, preventing pre-existing resting contacts from triggering taps.
   - Isolated from 4-finger system gestures (Mission Control / Space Switch).
-  - Rejects vertical scrolling drift during initial tap recognition to prevent accidental triggers during normal browsing.
 
 ---
 
@@ -128,10 +130,17 @@ TrackpadGestures/
 
 You can customize behavior directly in the source files before running `./build.sh`:
 
-- **Swipe Sensitivity & Tap Thresholds** ([`GestureEngine.swift`](Sources/GestureEngine.swift)):
+- **Swipe Sensitivity, Tap & Palm Rejection Thresholds** ([`GestureEngine.swift`](Sources/GestureEngine.swift)):
   - `swipeActivationThreshold`: Trackpad distance to activate switcher (default: `0.035`).
   - `tapMaxDrift`: Maximum finger drift allowed during a tap (default: `0.055`).
+  - `tapMinDuration`: Minimum contact duration for a tap to reject typing brushes (default: `0.05s`).
   - `tapMaxDuration`: Max duration for a 3-finger touch to register as a middle-click tap (default: `0.40s`).
+  - `tapMaxClusterSpread`: Maximum allowed distance between any two fingers during a tap (default: `0.55`).
+  - `maxTouchLandingDelta`: Maximum landing time spread between the first and last finger (default: `0.10s`).
+  - `palmSizeThreshold`: Contact patch size threshold above which a touch is treated as a palm (default: `3.8`).
+  - `palmMajorAxisThreshold`: Ellipse major axis threshold above which a touch is treated as a palm (default: `36.0`).
+  - `palmBottomMargin`: Bottom margin ratio where resting palm/wrist touches are suppressed (default: `0.08`).
+  - `palmCornerMarginX` / `palmCornerMarginY`: Bottom corner margins for resting palm detection (`0.16` / `0.14`).
   - `switchStepDistanceX`: Horizontal trackpad distance per card column (default: `0.075`).
   - `switchStepDistanceY`: Vertical trackpad distance per card row (default: `0.085`).
 - **Debug Logging**:
